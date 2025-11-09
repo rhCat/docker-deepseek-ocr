@@ -112,31 +112,47 @@ RUN mkdir -p /out && cp dist/torchvision-0.21.0*.whl /out/
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
-    HF_HOME=/cache/hf TRANSFORMERS_CACHE=/cache/hf TORCH_HOME=/cache/torch \
-    TORCH_ALLOW_TF32=1 PORT=8100 DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
+    HF_HOME=/cache/hf \
+    TRANSFORMERS_CACHE=/cache/hf \
+    TORCH_HOME=/cache/torch \
+    TORCH_ALLOW_TF32=1 \
+    PORT=8100 \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC
 
+# --- OS deps FIRST (so torch can import later) ---
 RUN ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && \
     apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-pip python-is-python3 python3-opencv tzdata git && \
-    dpkg-reconfigure -f noninteractive tzdata && \
-    python3 -m pip install --upgrade pip setuptools wheel && \
-    rm -rf /var/lib/apt/lists/*
+      python3 python3-pip python-is-python3 \
+      tzdata git \
+      libopenblas0 libnuma1 \
+      cuda-cupti-12-4 \
+      python3-opencv \
+    && dpkg-reconfigure -f noninteractive tzdata \
+    && echo "/usr/local/cuda/extras/CUPTI/lib64" > /etc/ld.so.conf.d/cupti.conf \
+    && ldconfig \
+    && python3 -m pip install --upgrade pip setuptools wheel \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install the built wheels
+ENV OPENBLAS_NUM_THREADS=1 \
+    LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:${LD_LIBRARY_PATH}
+
+# --- Install the built wheels (torch/vision) ---
 COPY --from=build-pytorch /out/torch-2.6.0*.whl /tmp/
-COPY --from=build-vision /out/torchvision-0.21.0*.whl /tmp/
-RUN python3 -m pip install /tmp/torch-2.6.0*.whl /tmp/torchvision-0.21.0*.whl && rm -f /tmp/*.whl
+COPY --from=build-vision  /out/torchvision-0.21.0*.whl /tmp/
+RUN python3 -m pip install /tmp/torch-2.6.0*.whl /tmp/torchvision-0.21.0*.whl \
+    && rm -f /tmp/*.whl
 
-# Your pinned userspace deps
+# --- Python deps AFTER torch/vision ---
 RUN python3 -m pip install \
       transformers==4.46.3 tokenizers==0.20.3 \
       einops addict easydict python-multipart \
-      safetensors sentencepiece fastapi uvicorn pillow peft && \
-    python3 -m pip install flash-attn==2.7.3 --no-build-isolation || true
+      safetensors sentencepiece fastapi uvicorn pillow peft \
+    && python3 -m pip install flash-attn==2.7.3 --no-build-isolation || true
 
 WORKDIR /app
 COPY app.py /app/
 
 EXPOSE 8100
-CMD ["sh","-c","python3 -m uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8100"]
 
