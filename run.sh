@@ -17,7 +17,7 @@ GPU_OPT="${GPU_OPT:---gpus all}"
 MODEL_REPO="${MODEL_REPO:-/home/rhmaomao/myServer/llm_models/DeepSeek-OCR}"
 
 # Optional outputs dir (host) for saved artifacts
-OUTPUTS_DIR="${OUTPUTS_DIR:-}"
+OUTPUTS_DIR="${OUTPUTS_DIR:-/home/rhmaomao/myServer/llm_services/dpocr/outputs}"
 
 # Optional HF token (only needed for gated repos)
 HF_TOKEN="${HF_TOKEN:-}"
@@ -64,7 +64,8 @@ RUN_ARGS=(
   -e TRANSFORMERS_CACHE=/cache/hf
   -e TORCH_HOME=/cache/torch
   -e PORT="${PORT}"                            # container listens on this port
-  -e REPO_ID="/models/DeepSeek-OCR"            # tell app to use the local repo
+  -e REPO_ID="/models/DeepSeek-OCR"
+  -e USE_FLASH_ATTENTION=0            # tell app to use the local repo
 )
 
 # Optional outputs dir

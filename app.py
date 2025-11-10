@@ -2,6 +2,7 @@
 import os
 import io
 import uuid
+import json
 import pathlib
 import tempfile
 from typing import List, Optional, Any
@@ -80,6 +81,7 @@ class OCRResponse(BaseModel):
     text: str
     saved_paths: Optional[List[str]] = None  # any files saved by the model
     prompt: Optional[str] = None
+    output_dir: Optional[str] = None         # per-request folder
 
 class OCRBatchResponse(BaseModel):
     results: List[OCRResponse]
@@ -110,20 +112,66 @@ def _save_upload_to_tmp(upload: UploadFile) -> str:
     tmp.close()
     return tmp.name
 
-def _call_infer(img_path: str, prompt: str, base_size: int, image_size: int,
-                crop_mode: bool, test_compress: bool, save_results: bool) -> OCRResponse:
+def _extract_text_from_infer(raw_ret: Any) -> str:
+    """
+    Try to get the main OCR text out of whatever infer() returned.
+    Be tolerant of dict / list / str / bytes.
+    """
+    # Common: dict with "text" or "texts"
+    if isinstance(raw_ret, dict):
+        if isinstance(raw_ret.get("text"), str):
+            return raw_ret["text"]
+        if isinstance(raw_ret.get("texts"), list):
+            return "\n\n".join(str(t) for t in raw_ret["texts"])
+        # last resort: dump the whole thing
+        return json.dumps(raw_ret, ensure_ascii=False, indent=2)
+
+    # Sometimes a list of things
+    if isinstance(raw_ret, (list, tuple)):
+        parts = []
+        for item in raw_ret:
+            parts.append(_extract_text_from_infer(item))
+        return "\n\n".join(p for p in parts if p.strip())
+
+    # Raw bytes
+    if isinstance(raw_ret, bytes):
+        return raw_ret.decode("utf-8", errors="ignore")
+
+    # Plain string (likely your case)
+    if isinstance(raw_ret, str):
+        return raw_ret.strip()
+
+    # Fallback
+    return str(raw_ret)
+
+
+def _call_infer(
+    img_path: str,
+    prompt: str,
+    base_size: int,
+    image_size: int,
+    crop_mode: bool,
+    test_compress: bool,
+    save_results: bool,
+    output_dir: Optional[pathlib.Path] = None,
+) -> OCRResponse:
     model, tokenizer = load_model_and_tokenizer()
 
-    # The authors’ API:
-    # model.infer(tokenizer, prompt='', image_file='', output_path=' ',
-    #             base_size=1024, image_size=640, crop_mode=True,
-    #             test_compress=False, save_results=False)
+    # Make per-call directory
+    if output_dir is None:
+        call_id = uuid.uuid4().hex
+        call_dir = OUTPUT_DIR / call_id
+    else:
+        call_dir = output_dir
+
+    call_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        text = model.infer(
+        raw_ret = model.infer(
             tokenizer,
             prompt=prompt,
             image_file=img_path,
-            output_path=str(OUTPUT_DIR),
+            output_path=str(call_dir),
             base_size=base_size,
             image_size=image_size,
             crop_mode=crop_mode,
@@ -133,22 +181,53 @@ def _call_infer(img_path: str, prompt: str, base_size: int, image_size: int,
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"infer() failed: {e}")
 
-    # Collect any files newly written to OUTPUT_DIR (best-effort)
-    saved = []
+    # Collect all files for this call (even if there are none)
+    saved: List[str] = []
     try:
-        # List files modified in the last 5 minutes as a heuristic
-        import time
-        cutoff = time.time() - 300
-        for p in OUTPUT_DIR.glob("*"):
-            try:
-                if p.is_file() and p.stat().st_mtime >= cutoff:
-                    saved.append(str(p))
-            except Exception:
-                pass
+        for p in call_dir.rglob("*"):
+            if p.is_file():
+                saved.append(str(p))
     except Exception:
         pass
 
-    return OCRResponse(text=str(text), saved_paths=saved, prompt=prompt)
+    # ---- try to load the main OCR text from saved files ----
+    main_text = ""
+    try:
+        candidates = []
+        for p in call_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            suf = p.suffix.lower()
+            # include .mmd here
+            if suf in (".md", ".mmd", ".txt", ".json"):
+                candidates.append(p)
+
+        for p in sorted(candidates, key=lambda x: x.name):
+            try:
+                main_text = p.read_text(encoding="utf-8", errors="ignore")
+                if main_text.strip():
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Fallback if still empty
+    if not main_text:
+        if isinstance(raw_ret, bytes):
+            main_text = raw_ret.decode("utf-8", errors="ignore")
+        elif isinstance(raw_ret, str):
+            main_text = raw_ret
+        elif raw_ret is None:
+            main_text = ""
+        else:
+            main_text = ""
+    return OCRResponse(
+        text=main_text,
+        saved_paths=saved,
+        prompt=prompt,
+        output_dir=str(call_dir),
+    )
 
 @app.post("/ocr", response_model=OCRResponse)
 async def ocr(
@@ -170,6 +249,7 @@ async def ocr(
             crop_mode=crop_mode,
             test_compress=test_compress,
             save_results=save_results,
+            # output_dir=None -> auto /outputs/<uuid>
         )
     finally:
         try:
@@ -187,12 +267,23 @@ async def ocr_batch(
     test_compress: bool = Query(True),
     save_results: bool = Query(True),
 ):
+    # One top-level dir for this batch call
+    batch_id = uuid.uuid4().hex
+    batch_dir = OUTPUT_DIR / f"batch_{batch_id}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
     results: List[OCRResponse] = []
     tmp_files: List[str] = []
+
     try:
-        for f in files:
+        for idx, f in enumerate(files, start=1):
             img_path = _save_upload_to_tmp(f)
             tmp_files.append(img_path)
+
+            # Subfolder per image
+            img_dir = batch_dir / f"item_{idx:04d}"
+            img_dir.mkdir(parents=True, exist_ok=True)
+
             res = _call_infer(
                 img_path=img_path,
                 prompt=prompt,
@@ -201,6 +292,7 @@ async def ocr_batch(
                 crop_mode=crop_mode,
                 test_compress=test_compress,
                 save_results=save_results,
+                output_dir=img_dir,
             )
             results.append(res)
     finally:
@@ -209,5 +301,5 @@ async def ocr_batch(
                 os.unlink(p)
             except Exception:
                 pass
-    return OCRBatchResponse(results=results)
 
+    return OCRBatchResponse(results=results)
