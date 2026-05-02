@@ -14,10 +14,10 @@ GPU_OPT="${GPU_OPT:---gpus all}"
 
 # DEFAULT: use your provided absolute model repo path
 # Override with: export MODEL_REPO="/abs/path/to/DeepSeek-OCR"
-MODEL_REPO="${MODEL_REPO:-/home/rhmaomao/myServer/llm_models/DeepSeek-OCR}"
+MODEL_REPO="${MODEL_REPO:-/data/llm_models/DeepSeek-OCR}"
 
 # Optional outputs dir (host) for saved artifacts
-OUTPUTS_DIR="${OUTPUTS_DIR:-/home/rhmaomao/myServer/llm_services/dpocr/outputs}"
+OUTPUTS_DIR="${OUTPUTS_DIR:-/var/log/llm_services/dpocr/outputs}"
 
 # Optional HF token (only needed for gated repos)
 HF_TOKEN="${HF_TOKEN:-}"
